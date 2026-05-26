@@ -132,6 +132,15 @@ If the bot is running but does not reply, check whether Nginx logs show
 message events. The history poller will still process new channel messages every
 few seconds as long as the bot has `channels:history` and is in the channel.
 
+Ngrok
+
+```
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o cloudflared.deb
+```
+```
+cloudflared tunnel --url https://localhost --no-tls-verify
+```
+
 ## Health
 
 `GET /health`
