@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment files (credentials, secrets)
+.env
+.env.*
+!.env.example
+
+# Logs and debugging
+npm-debug.log
+*.log
+logs/
+coverage/
+
+# SSL/TLS certificates
+nginx/certs/*.pem
+!nginx/certs/.gitkeep
+
+# OS and IDE files
+.DS_Store
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Build and distribution
+dist/
+build/
+
+# Downloaded files
+*.deb
+cloudflared*
+
+# Local development
+.env.local
+*.pem
+*.key
