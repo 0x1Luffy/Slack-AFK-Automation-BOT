@@ -41,6 +41,15 @@ function loadConfig() {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
 
+  const oauthConfigured = Boolean(
+    process.env.SLACK_CLIENT_ID && process.env.SLACK_CLIENT_SECRET && process.env.SLACK_OAUTH_REDIRECT_URI
+  );
+  if ((process.env.NODE_ENV || 'development') === 'production' && oauthConfigured) {
+    if (!process.env.TOKEN_ENCRYPTION_KEY || process.env.TOKEN_ENCRYPTION_KEY.length < 32) {
+      throw new Error('TOKEN_ENCRYPTION_KEY must be set to at least 32 characters when OAuth is enabled in production');
+    }
+  }
+
   return {
     env: process.env.NODE_ENV || 'development',
     port: readInteger('PORT', 3000, { min: 1, max: 65535 }),
@@ -60,7 +69,7 @@ function loadConfig() {
     historyPollingEnabled: readBoolean('SLACK_HISTORY_POLLING_ENABLED', true),
     historyPollingIntervalMs: readInteger('SLACK_HISTORY_POLLING_INTERVAL_MS', 5000, { min: 1000, max: 60000 }),
     slackStatusEnabled: readBoolean('SLACK_STATUS_ENABLED', true),
-    afkStatusEmoji: process.env.AFK_STATUS_EMOJI || ':no_entry:',
+    afkStatusEmoji: process.env.AFK_STATUS_EMOJI || ':sleeping:',
     afkStatusText: process.env.AFK_STATUS_TEXT || 'AFK'
   };
 }

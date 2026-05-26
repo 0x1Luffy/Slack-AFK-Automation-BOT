@@ -1,6 +1,7 @@
 'use strict';
 
 const { WebClient } = require('@slack/web-api');
+const { formatDurationWords } = require('./parser');
 
 class SlackStatusManager {
   constructor({ token, enabled, emoji, text, tokenStore, oauthManager, logger }) {
@@ -64,11 +65,12 @@ class SlackStatusManager {
     if (!target.ok) return target;
 
     const emoji = statusEmoji || this.emoji;
+    const statusText = `${this.text} for ${formatDurationWords(expiresAt - Date.now())}`.slice(0, 100);
 
     try {
       await target.client.users.profile.set({
         profile: {
-          status_text: `${this.text}: ${String(reason || '').slice(0, 90)}`.slice(0, 100),
+          status_text: statusText,
           status_emoji: emoji,
           status_expiration: Math.floor(expiresAt / 1000)
         }

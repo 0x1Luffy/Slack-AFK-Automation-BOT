@@ -61,7 +61,6 @@ async function main() {
     sessionStore,
     slackClient: app.client,
     statusManager,
-    channelId: config.afkChannelId,
     logger
   });
   const historyPoller = startHistoryPolling();

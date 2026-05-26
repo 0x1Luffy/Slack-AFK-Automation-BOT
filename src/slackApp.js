@@ -1,7 +1,9 @@
 'use strict';
 
 const { App, ExpressReceiver } = require('@slack/bolt');
-const { COMMANDS, extractMentionedUserIds, formatDuration, parseCommand } = require('./parser');
+const helmet = require('helmet');
+const { messages } = require('./messages');
+const { COMMANDS, extractMentionedUserIds, parseCommand } = require('./parser');
 const { consumeCommand } = require('./rateLimiter');
 
 function createSlackAfkApp({
@@ -13,18 +15,35 @@ function createSlackAfkApp({
   scheduleAutoReturn,
   removeAutoReturn,
   queueDepth,
-  redis
+  redis,
+  boltApp,
+  receiver: providedReceiver
 }) {
-  const receiver = new ExpressReceiver({
-    signingSecret: config.slackSigningSecret,
-    processBeforeResponse: true
-  });
+  const receiver =
+    providedReceiver ||
+    new ExpressReceiver({
+      signingSecret: config.slackSigningSecret,
+      processBeforeResponse: true
+    });
 
-  const app = new App({
-    token: config.slackBotToken,
-    receiver,
-    logLevel: 'ERROR'
-  });
+  if (!providedReceiver) {
+    receiver.app.disable('x-powered-by');
+    receiver.app.set('trust proxy', 1);
+    receiver.app.use(
+      helmet({
+        contentSecurityPolicy: false,
+        hsts: config.env === 'production' ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false
+      })
+    );
+  }
+
+  const app =
+    boltApp ||
+    new App({
+      token: config.slackBotToken,
+      receiver,
+      logLevel: 'ERROR'
+    });
 
   receiver.app.get('/health', async (_req, res) => {
     try {
@@ -116,13 +135,13 @@ function createSlackAfkApp({
         await client.chat.postMessage({
           channel: event.channel,
           thread_ts: event.ts,
-          text: `<@${userId}>, slow down a touch. You can use AFK commands again in ${limit.retryAfterSeconds}s.`
+          text: messages.rateLimitedPublic(userId, limit.retryAfterSeconds)
         });
       } else {
         await client.chat.postEphemeral({
           channel: event.channel,
           user: userId,
-          text: `Slow down a touch. You can use AFK commands again in ${limit.retryAfterSeconds}s.`
+          text: messages.rateLimited(limit.retryAfterSeconds)
         });
       }
       return;
@@ -134,8 +153,7 @@ function createSlackAfkApp({
       await statusManager.clearAfk(userId);
       await client.chat.postMessage({
         channel: event.channel,
-        thread_ts: event.ts,
-        text: `Welcome back, <@${userId}>.`
+        text: messages.back(userId)
       });
       logger.info('AFK session cleared manually', { userId });
       return;
@@ -147,7 +165,7 @@ function createSlackAfkApp({
         await client.chat.postMessage({
           channel: event.channel,
           thread_ts: event.ts,
-          text: `<@${userId}>, you are not currently marked AFK.`
+          text: messages.notAfk(userId)
         });
         return;
       }
@@ -160,12 +178,19 @@ function createSlackAfkApp({
       await maybeSendStatusConnectPrompt({ statusResult, client, event, userId });
       await client.chat.postMessage({
         channel: event.channel,
-        thread_ts: event.ts,
-        text: `<@${userId}> AFK extended by ${formatDuration(command.durationMs)}. Back in ${formatDuration(
-          expiresAt - Date.now()
-        )}.`
+        text: messages.afkExtended(command.durationMs)
       });
       logger.info('AFK session extended', { userId, expiresAt });
+      return;
+    }
+
+    const existing = await sessionStore.get(userId);
+    if (existing) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.ts,
+        text: messages.alreadyAfk(userId)
+      });
       return;
     }
 
@@ -186,8 +211,7 @@ function createSlackAfkApp({
     await maybeSendStatusConnectPrompt({ statusResult, client, event, userId });
     await client.chat.postMessage({
       channel: event.channel,
-      thread_ts: event.ts,
-      text: `<@${userId}> is AFK for ${formatDuration(command.durationMs)}: ${command.reason}`
+      text: messages.afkUpdated(command.durationMs)
     });
     logger.info('AFK session started', { userId, expiresAt });
   }
@@ -195,14 +219,10 @@ function createSlackAfkApp({
   async function maybeSendStatusConnectPrompt({ statusResult, client, event, userId }) {
     if (!statusResult || statusResult.ok || statusResult.reason !== 'missing_user_oauth') return;
 
-    const text = statusResult.connectUrl
-      ? `<@${userId}>, AFK tracking is on. To also set your Slack status emoji automatically, connect once: ${statusResult.connectUrl}`
-      : `<@${userId}>, AFK tracking is on. Automatic Slack status emoji needs OAuth setup by an admin.`;
-
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
-      text
+      text: messages.statusConnectPrompt(userId, statusResult.connectUrl)
     });
   }
 
@@ -213,10 +233,7 @@ function createSlackAfkApp({
 
     const replies = sessions
       .filter(Boolean)
-      .map((session) => {
-        const remaining = formatDuration(session.expiresAt - Date.now());
-        return `<@${session.userId}> is AFK for ${remaining}: ${session.reason}`;
-      });
+      .map((session) => messages.mentionStatus(session));
 
     if (replies.length === 0) return;
 

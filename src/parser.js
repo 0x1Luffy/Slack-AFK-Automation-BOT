@@ -3,6 +3,7 @@
 const emoji = require('node-emoji');
 
 const MAX_INPUT_LENGTH = 200;
+const MAX_DURATION_MINUTES = 7 * 24 * 60;
 const COMMANDS = Object.freeze({
   AFK: 'afk',
   EXTEND: 'extend',
@@ -10,15 +11,19 @@ const COMMANDS = Object.freeze({
 });
 
 const BACK_RE = /^back$/i;
-const DURATION_PATTERN =
-  '[0-9]{1,3}\\s*(?:days|day|d|hours|hour|hrs|hr|h|minutes|minute|mins|min|m)(?:\\s*[0-9]{1,3}\\s*(?:days|day|d|hours|hour|hrs|hr|h|minutes|minute|mins|min|m))*';
-const AFK_RE = new RegExp(`^afk\\s+(${DURATION_PATTERN})(?:\\s+(.{1,160}))?$`, 'i');
-const EXTEND_RE = new RegExp(`^afk\\s+extend\\s+(${DURATION_PATTERN})$`, 'i');
+const DURATION_PART_PATTERN = '[0-9]{1,3}\\s*(?:days|day|d|hours|hour|hrs|hr|h|minutes|minute|mins|min|m)';
+const DURATION_PATTERN = `${DURATION_PART_PATTERN}(?:\\s*${DURATION_PART_PATTERN})*`;
+const AFK_BODY_RE = /^afk(?:\s+(.+))?$/i;
+const AFK_DURATION_FIRST_RE = new RegExp(`^(${DURATION_PATTERN})(?:\\s+(.{1,160}))?$`, 'i');
+const AFK_DURATION_LAST_RE = new RegExp(`^(.{1,160}?)\\s+(${DURATION_PATTERN})$`, 'i');
+const EXTEND_RE = new RegExp(`^(?:(?:afk\\s+extend|extend|more)\\s+|\\+\\s*)(${DURATION_PATTERN})$`, 'i');
 const DURATION_PART_RE = /([0-9]{1,3})\s*(days|day|d|hours|hour|hrs|hr|h|minutes|minute|mins|min|m)/gi;
 const MENTION_RE = /<@([UW][A-Z0-9]{2,})>/g;
 const EMOJI_RE = /:([a-z0-9_+-]+):/i;
-const FOOD_KEYWORD_RE =
+const LUNCH_KEYWORD_RE =
   /\b(?:lunch|lun+ch|luch|lnch|luunch|dinner|din+er|diner|dinnr|dnner|breakfast|brunch|meal|food|eat|eating|snack|snaks|snackng)\b/i;
+const MEETING_KEYWORD_RE = /\b(?:meeting|meet|call|standup|sync|interview|demo|discussion)\b/i;
+const BREAK_KEYWORD_RE = /\b(?:break|coffee|tea|chai|rest)\b/i;
 
 function normalizeInput(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, MAX_INPUT_LENGTH);
@@ -41,7 +46,7 @@ function parseDurationToMs(input) {
     if (unit === 'm' || unit.startsWith('min')) totalMinutes += amount;
   }
 
-  if (consumed !== source || totalMinutes <= 0) {
+  if (consumed !== source || totalMinutes <= 0 || totalMinutes > MAX_DURATION_MINUTES) {
     return null;
   }
 
@@ -62,22 +67,51 @@ function parseCommand(text) {
     return durationMs ? { type: COMMANDS.EXTEND, durationMs } : null;
   }
 
-  const afk = AFK_RE.exec(normalized);
+  const afk = AFK_BODY_RE.exec(normalized);
   if (afk) {
-    const durationMs = parseDurationToMs(afk[1]);
-    if (!durationMs) return null;
-    const reason = (afk[2] || 'AFK').trim();
-    const statusEmoji = extractStatusEmoji(reason);
+    const parsed = parseAfkBody(afk[1]);
+    if (!parsed) return null;
+    const statusEmoji = extractStatusEmoji(parsed.reason);
 
     return {
       type: COMMANDS.AFK,
-      durationMs,
-      reason,
-      ...(statusEmoji ? { statusEmoji } : {})
+      durationMs: parsed.durationMs,
+      reason: parsed.reason,
+      statusEmoji
     };
   }
 
   return null;
+}
+
+function parseAfkBody(body) {
+  const normalized = normalizeInput(body);
+  if (!normalized) return null;
+
+  const durationFirst = AFK_DURATION_FIRST_RE.exec(normalized);
+  if (durationFirst) {
+    const durationMs = parseDurationToMs(durationFirst[1]);
+    if (!durationMs) return null;
+    return {
+      durationMs,
+      reason: sanitizeReason(durationFirst[2] || 'AFK')
+    };
+  }
+
+  const durationLast = AFK_DURATION_LAST_RE.exec(normalized);
+  if (!durationLast) return null;
+
+  const durationMs = parseDurationToMs(durationLast[2]);
+  if (!durationMs) return null;
+  return {
+    durationMs,
+    reason: sanitizeReason(durationLast[1] || 'AFK')
+  };
+}
+
+function sanitizeReason(reason) {
+  const normalized = normalizeInput(reason).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120).trim();
+  return normalized || 'AFK';
 }
 
 function extractStatusEmoji(text) {
@@ -87,13 +121,23 @@ function extractStatusEmoji(text) {
 
   const unemojified = emoji.unemojify(normalized);
   if (unemojified === normalized) {
-    return FOOD_KEYWORD_RE.test(normalized) ? ':hamburger:' : null;
+    if (LUNCH_KEYWORD_RE.test(normalized)) return ':hamburger:';
+    if (MEETING_KEYWORD_RE.test(normalized)) return ':telephone_receiver:';
+    if (BREAK_KEYWORD_RE.test(normalized)) return ':coffee:';
+    return ':sleeping:';
   }
 
   const convertedMatch = EMOJI_RE.exec(unemojified);
   if (convertedMatch) return `:${convertedMatch[1]}:`;
 
-  return null;
+  return ':sleeping:';
+}
+
+function escapeSlackText(text) {
+  return normalizeInput(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function stripStatusEmoji(text) {
@@ -136,14 +180,32 @@ function formatDuration(ms) {
   return parts.join(' ');
 }
 
+function formatDurationWords(ms) {
+  const totalMinutes = Math.max(0, Math.ceil(ms / 60000));
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  const parts = [];
+
+  if (days) parts.push(`${days} ${days === 1 ? 'day' : 'days'}`);
+  if (hours) parts.push(`${hours} ${hours === 1 ? 'hr' : 'hrs'}`);
+  if (minutes || parts.length === 0) parts.push(`${minutes} ${minutes === 1 ? 'min' : 'mins'}`);
+
+  return parts.join(' ');
+}
+
 module.exports = {
   COMMANDS,
+  MAX_DURATION_MINUTES,
   MAX_INPUT_LENGTH,
+  escapeSlackText,
   extractMentionedUserIds,
   extractStatusEmoji,
   formatDuration,
+  formatDurationWords,
   normalizeInput,
   parseCommand,
   parseDurationToMs,
+  sanitizeReason,
   stripStatusEmoji
 };
