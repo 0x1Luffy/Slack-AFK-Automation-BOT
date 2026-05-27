@@ -15,7 +15,7 @@ function createLogger() {
   };
 }
 
-function createTestApp({ session, statusSetResult = { ok: true } }) {
+function createTestApp({ session, statusSetResult = { ok: true }, redis = { status: 'ready', async set() { return 'OK'; } } } = {}) {
   const posts = [];
   const scheduled = [];
   const sessions = new Map(session ? [[session.userId, session]] : []);
@@ -60,12 +60,7 @@ function createTestApp({ session, statusSetResult = { ok: true } }) {
     async queueDepth() {
       return 0;
     },
-    redis: {
-      status: 'ready',
-      async set() {
-        return 'OK';
-      }
-    },
+    redis,
     boltApp: {
       client: {},
       event() {}
@@ -83,6 +78,11 @@ function createTestApp({ session, statusSetResult = { ok: true } }) {
     scheduled,
     sessions,
     slackClient: {
+      conversations: {
+        async open({ users }) {
+          return { channel: { id: `D_${users}` } };
+        }
+      },
       chat: {
         async postEphemeral(args) {
           posts.push({ method: 'postEphemeral', ...args });
@@ -231,7 +231,50 @@ test('afk confirmation is sent before status connection prompt', async () => {
   assert.equal(testApp.posts[0].text, '✅ AFK status updated for 5 mins');
   assert.equal(testApp.posts[0].method, 'postMessage');
   assert.match(testApp.posts[1].text, /connect once/);
-  assert.equal(testApp.posts[1].method, 'postEphemeral');
+  assert.equal(testApp.posts[1].method, 'postMessage');
+  assert.equal(testApp.posts[1].channel, 'D_U123');
+});
+
+test('ignores duplicate messages seen by events-api and history-poller using the same timestamp', async () => {
+  const posted = [];
+  const keyStore = new Set();
+  const testApp = createTestApp({
+    redis: {
+      status: 'ready',
+      async set(key, value, ...args) {
+        if (keyStore.has(key)) return null;
+        keyStore.add(key);
+        return 'OK';
+      }
+    }
+  });
+
+  await testApp.processMessage({
+    event: {
+      channel: 'C_AFk',
+      user: 'U123',
+      text: 'afk 10mins',
+      ts: '1710000005.000700'
+    },
+    client: testApp.slackClient,
+    botUserId: 'UBOT',
+    source: 'events-api'
+  });
+
+  await testApp.processMessage({
+    event: {
+      channel: 'C_AFk',
+      user: 'U123',
+      text: 'afk 10mins',
+      ts: '1710000005.000700'
+    },
+    client: testApp.slackClient,
+    botUserId: 'UBOT',
+    source: 'history-poller'
+  });
+
+  assert.equal(testApp.posts.length, 1);
+  assert.equal(testApp.posts[0].text, '✅ AFK status updated for 10 mins');
 });
 
 test('readLastLogLines returns the last requested lines', async () => {

@@ -183,16 +183,11 @@ function createSlackAfkApp({
   });
 
   async function markProcessed(event, source) {
-    const clientMsgId = event.client_msg_id;
-    if (clientMsgId) {
-      const result = await redis.set(`afk:processed-message:${event.channel}:client:${clientMsgId}`, source, 'EX', 86400, 'NX');
-      return result === 'OK';
-    }
-
     const messageTs = event.ts || event.message_ts;
-    if (!messageTs) return true;
+    const dedupeId = messageTs ? `ts:${messageTs}` : event.client_msg_id ? `client:${event.client_msg_id}` : null;
+    if (!dedupeId) return true;
 
-    const result = await redis.set(`afk:processed-message:${event.channel}:${messageTs}`, source, 'EX', 86400, 'NX');
+    const result = await redis.set(`afk:processed-message:${event.channel}:${dedupeId}`, source, 'EX', 86400, 'NX');
     return result === 'OK';
   }
 
@@ -347,6 +342,17 @@ function createSlackAfkApp({
     const text = messages.statusConnectPrompt(userId, statusResult.connectUrl);
 
     try {
+      await sendDm(client, userId, text);
+      return;
+    } catch (error) {
+      logger.warn('Could not send status connection prompt by DM; falling back to ephemeral', {
+        userId,
+        channel: event.channel,
+        error
+      });
+    }
+
+    try {
       await client.chat.postEphemeral({
         channel: event.channel,
         thread_ts: replyThreadTs(event),
@@ -354,12 +360,11 @@ function createSlackAfkApp({
         text
       });
     } catch (error) {
-      logger.warn('Could not send status connection prompt ephemerally; sending DM instead', {
+      logger.error('Could not send status connection prompt privately', {
         userId,
         channel: event.channel,
         error
       });
-      await sendDm(client, userId, text);
     }
   }
 
