@@ -8,6 +8,16 @@ const { messages } = require('./messages');
 const { COMMANDS, extractMentionedUserIds, parseCommand } = require('./parser');
 const { consumeCommand } = require('./rateLimiter');
 
+async function sendDm(slackClient, userId, text) {
+  const opened = await slackClient.conversations.open({ users: userId });
+  const channel = opened.channel && opened.channel.id;
+  if (!channel) {
+    throw new Error('Slack did not return a DM channel');
+  }
+
+  await slackClient.chat.postMessage({ channel, text });
+}
+
 async function readLastLogLines(logFile, lineCount = 100) {
   try {
     const content = await fs.readFile(logFile, 'utf8');
@@ -173,6 +183,12 @@ function createSlackAfkApp({
   });
 
   async function markProcessed(event, source) {
+    const clientMsgId = event.client_msg_id;
+    if (clientMsgId) {
+      const result = await redis.set(`afk:processed-message:${event.channel}:client:${clientMsgId}`, source, 'EX', 86400, 'NX');
+      return result === 'OK';
+    }
+
     const messageTs = event.ts || event.message_ts;
     if (!messageTs) return true;
 
@@ -328,12 +344,23 @@ function createSlackAfkApp({
   async function maybeSendStatusConnectPrompt({ statusResult, client, event, userId }) {
     if (!statusResult || statusResult.ok || statusResult.reason !== 'missing_user_oauth') return;
 
-    await client.chat.postEphemeral({
-      channel: event.channel,
-      thread_ts: replyThreadTs(event),
-      user: userId,
-      text: messages.statusConnectPrompt(userId, statusResult.connectUrl)
-    });
+    const text = messages.statusConnectPrompt(userId, statusResult.connectUrl);
+
+    try {
+      await client.chat.postEphemeral({
+        channel: event.channel,
+        thread_ts: replyThreadTs(event),
+        user: userId,
+        text
+      });
+    } catch (error) {
+      logger.warn('Could not send status connection prompt ephemerally; sending DM instead', {
+        userId,
+        channel: event.channel,
+        error
+      });
+      await sendDm(client, userId, text);
+    }
   }
 
   async function handleMentions({ mentionedUserIds, client, event }) {
