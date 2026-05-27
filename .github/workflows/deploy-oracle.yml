@@ -1,0 +1,102 @@
+name: Deploy to Oracle Ubuntu
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: oracle-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    environment: production
+    env:
+      ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+      ORACLE_USER: ${{ secrets.ORACLE_USER }}
+      ORACLE_PORT: ${{ secrets.ORACLE_PORT || '22' }}
+      ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+      DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT || '/opt/slack-afk-bot' }}
+    steps:
+      - name: Validate required secrets
+        run: |
+          test -n "$ORACLE_HOST"
+          test -n "$ORACLE_USER"
+          test -n "$ORACLE_SSH_KEY"
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$ORACLE_SSH_KEY" > ~/.ssh/oracle_deploy_key
+          chmod 600 ~/.ssh/oracle_deploy_key
+          ssh-keyscan -p "$ORACLE_PORT" -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy over SSH
+        run: |
+          ssh -i ~/.ssh/oracle_deploy_key -p "$ORACLE_PORT" "$ORACLE_USER@$ORACLE_HOST" \
+            "DEPLOY_ROOT='$DEPLOY_ROOT' REPO='https://github.com/${{ github.repository }}.git' BRANCH='${{ github.ref_name }}' bash -s" <<'SCRIPT'
+          set -euo pipefail
+
+          APP_DIR="$DEPLOY_ROOT/app"
+          ENV_FILE="$DEPLOY_ROOT/.env"
+
+          command -v git >/dev/null || { echo "git is not installed on the server"; exit 1; }
+          command -v docker >/dev/null || { echo "docker is not installed on the server"; exit 1; }
+          DOCKER="docker"
+          if ! docker ps >/dev/null 2>&1; then
+            DOCKER="sudo docker"
+          fi
+          $DOCKER compose version >/dev/null || { echo "docker compose plugin is not installed on the server"; exit 1; }
+
+          sudo mkdir -p "$DEPLOY_ROOT"
+          sudo chown "$USER:$USER" "$DEPLOY_ROOT"
+
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "Missing $ENV_FILE"
+            echo "Create it on the server from .env.example before deploying."
+            exit 1
+          fi
+          chmod 600 "$ENV_FILE"
+
+          if [ ! -d "$APP_DIR/.git" ]; then
+            rm -rf "$APP_DIR"
+            git clone --branch "$BRANCH" "$REPO" "$APP_DIR"
+          fi
+
+          cd "$APP_DIR"
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          git reset --hard "origin/$BRANCH"
+
+          ln -sfn ../.env .env
+          mkdir -p logs nginx/certs nginx/certbot-www
+
+          $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml build --pull app
+          $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml up -d --remove-orphans app redis
+          $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml ps
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 http://127.0.0.1:3000/health
+          SCRIPT

@@ -54,6 +54,7 @@ function loadConfig() {
     env: process.env.NODE_ENV || 'development',
     port: readInteger('PORT', 3000, { min: 1, max: 65535 }),
     logLevel: process.env.LOG_LEVEL || 'info',
+    logAccessKey: process.env.LOG_ACCESS_KEY || '',
     slackBotToken: process.env.SLACK_BOT_TOKEN,
     slackUserToken: process.env.SLACK_USER_TOKEN || '',
     slackClientId: process.env.SLACK_CLIENT_ID || '',

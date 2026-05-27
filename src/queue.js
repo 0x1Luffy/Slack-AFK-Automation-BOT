@@ -7,6 +7,10 @@ const AUTO_RETURN_JOB = 'auto-return';
 const REMINDER_JOB = 'reminder';
 const REMINDER_BEFORE_MS = 60 * 1000;
 
+function queueJobId(userId, jobName) {
+  return `afk-${jobName}-${String(userId).replace(/:/g, '_')}`;
+}
+
 async function sendDm(slackClient, userId, text) {
   const opened = await slackClient.conversations.open({ users: userId });
   const channel = opened.channel && opened.channel.id;
@@ -50,7 +54,7 @@ function createAfkQueue({ queueName, connection, sessionStore, slackClient, stat
   );
 
   worker.on('failed', (job, error) => {
-    logger.error('Auto-return job failed', { jobId: job && job.id, error });
+    logger.error('AFK queue job failed', { jobId: job && job.id, jobName: job && job.name, error });
   });
   worker.on('error', (error) => logger.error('AFK worker error', { error }));
   queueEvents.on('error', (error) => logger.error('AFK queue events error', { error }));
@@ -58,11 +62,14 @@ function createAfkQueue({ queueName, connection, sessionStore, slackClient, stat
   async function scheduleAutoReturn(userId, expiresAt) {
     await removeAutoReturn(userId);
 
+    const reminderJobId = queueJobId(userId, REMINDER_JOB);
+    const autoReturnJobId = queueJobId(userId, AUTO_RETURN_JOB);
+
     await queue.add(
       REMINDER_JOB,
       { userId, expiresAt },
       {
-        jobId: `${userId}:reminder`,
+        jobId: reminderJobId,
         delay: Math.max(0, expiresAt - Date.now() - REMINDER_BEFORE_MS),
         attempts: 3,
         backoff: { type: 'exponential', delay: 1000 },
@@ -75,7 +82,7 @@ function createAfkQueue({ queueName, connection, sessionStore, slackClient, stat
       AUTO_RETURN_JOB,
       { userId, expiresAt },
       {
-        jobId: `${userId}:auto-return`,
+        jobId: autoReturnJobId,
         delay: Math.max(0, expiresAt - Date.now()),
         attempts: 3,
         backoff: { type: 'exponential', delay: 1000 },
@@ -86,7 +93,15 @@ function createAfkQueue({ queueName, connection, sessionStore, slackClient, stat
   }
 
   async function removeAutoReturn(userId) {
-    for (const jobId of [`${userId}:reminder`, `${userId}:auto-return`, userId]) {
+    const jobIds = [
+      queueJobId(userId, REMINDER_JOB),
+      queueJobId(userId, AUTO_RETURN_JOB),
+      `${userId}:reminder`,
+      `${userId}:auto-return`,
+      userId
+    ];
+
+    for (const jobId of jobIds) {
       const existing = await queue.getJob(jobId);
       if (existing) {
         try {
@@ -106,4 +121,4 @@ function createAfkQueue({ queueName, connection, sessionStore, slackClient, stat
   return { queue, queueEvents, worker, scheduleAutoReturn, removeAutoReturn, queueDepth };
 }
 
-module.exports = { AUTO_RETURN_JOB, REMINDER_BEFORE_MS, REMINDER_JOB, createAfkQueue, sendDm };
+module.exports = { AUTO_RETURN_JOB, REMINDER_BEFORE_MS, REMINDER_JOB, createAfkQueue, queueJobId, sendDm };

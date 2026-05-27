@@ -1,8 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
-const { createSlackAfkApp } = require('../src/slackApp');
+const { createSlackAfkApp, readLastLogLines } = require('../src/slackApp');
 
 function createLogger() {
   return {
@@ -12,7 +15,7 @@ function createLogger() {
   };
 }
 
-function createTestApp({ session }) {
+function createTestApp({ session, statusSetResult = { ok: true } }) {
   const posts = [];
   const scheduled = [];
   const sessions = new Map(session ? [[session.userId, session]] : []);
@@ -47,7 +50,7 @@ function createTestApp({ session }) {
         return { ok: true };
       },
       async setAfk() {
-        return { ok: true };
+        return statusSetResult;
       }
     },
     async scheduleAutoReturn(userId, expiresAt) {
@@ -121,6 +124,7 @@ test('thread reply "+20 mins" extends the replying user active AFK session', asy
   assert.equal(updated.expiresAt, original.expiresAt + 20 * 60 * 1000);
   assert.deepEqual(testApp.scheduled, [{ userId: 'U123', expiresAt: updated.expiresAt }]);
   assert.equal(testApp.posts.at(-1).text, '✅ AFK extended by 20 mins');
+  assert.equal(testApp.posts.at(-1).thread_ts, '1710000000.000100');
 });
 
 test('thread reply "more 20 mins" extends the replying user active AFK session', async () => {
@@ -152,4 +156,97 @@ test('thread reply "more 20 mins" extends the replying user active AFK session',
   assert.equal(updated.expiresAt, original.expiresAt + 20 * 60 * 1000);
   assert.deepEqual(testApp.scheduled, [{ userId: 'U123', expiresAt: updated.expiresAt }]);
   assert.equal(testApp.posts.at(-1).text, '✅ AFK extended by 20 mins');
+  assert.equal(testApp.posts.at(-1).thread_ts, '1710000000.000100');
+});
+
+test('top-level afk confirmation replies in the message thread', async () => {
+  const testApp = createTestApp({});
+
+  await testApp.processMessage({
+    event: {
+      channel: 'C_AFk',
+      user: 'U123',
+      text: 'afk 30min',
+      ts: '1710000002.000400'
+    },
+    client: testApp.slackClient,
+    botUserId: 'UBOT',
+    source: 'events-api'
+  });
+
+  assert.equal(testApp.posts.at(-1).text, '✅ AFK status updated for 30 mins');
+  assert.equal(testApp.posts.at(-1).thread_ts, '1710000002.000400');
+});
+
+test('ignores bot messages seen by history polling', async () => {
+  const now = Date.now();
+  const testApp = createTestApp({
+    session: {
+      userId: 'U123',
+      reason: 'AFK',
+      startedAt: now,
+      updatedAt: now,
+      expiresAt: now + 5 * 60 * 1000,
+      statusEmoji: ':sleeping:'
+    }
+  });
+
+  await testApp.processMessage({
+    event: {
+      channel: 'C_AFk',
+      user: 'UBOT',
+      app_id: 'A123',
+      text: '<@U123>, AFK tracking is on.',
+      ts: '1710000003.000500'
+    },
+    client: testApp.slackClient,
+    botUserId: 'UBOT',
+    source: 'history-poller'
+  });
+
+  assert.deepEqual(testApp.posts, []);
+});
+
+test('afk confirmation is sent before status connection prompt', async () => {
+  const testApp = createTestApp({
+    statusSetResult: {
+      ok: false,
+      reason: 'missing_user_oauth',
+      connectUrl: 'https://slack.example/connect'
+    }
+  });
+
+  await testApp.processMessage({
+    event: {
+      channel: 'C_AFk',
+      user: 'U123',
+      text: 'afk 5mins',
+      ts: '1710000004.000600'
+    },
+    client: testApp.slackClient,
+    botUserId: 'UBOT',
+    source: 'events-api'
+  });
+
+  assert.equal(testApp.posts[0].text, '✅ AFK status updated for 5 mins');
+  assert.match(testApp.posts[1].text, /connect once/);
+});
+
+test('readLastLogLines returns the last requested lines', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'afk-logs-'));
+  const file = path.join(dir, 'local-app.log');
+  const lines = Array.from({ length: 105 }, (_, index) => `line-${index + 1}`);
+  await fs.writeFile(file, `${lines.join('\n')}\n`);
+
+  const result = await readLastLogLines(file, 100);
+
+  assert.equal(result.split('\n').length, 100);
+  assert.equal(result.split('\n')[0], 'line-6');
+  assert.equal(result.split('\n').at(-1), 'line-105');
+});
+
+test('readLastLogLines returns empty text when log file is missing', async () => {
+  const result = await readLastLogLines('/tmp/does-not-exist-local-app.log', 100);
+
+  assert.equal(result, '');
 });

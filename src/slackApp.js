@@ -1,10 +1,24 @@
 'use strict';
 
+const fs = require('node:fs/promises');
+const path = require('node:path');
 const { App, ExpressReceiver } = require('@slack/bolt');
 const helmet = require('helmet');
 const { messages } = require('./messages');
 const { COMMANDS, extractMentionedUserIds, parseCommand } = require('./parser');
 const { consumeCommand } = require('./rateLimiter');
+
+async function readLastLogLines(logFile, lineCount = 100) {
+  try {
+    const content = await fs.readFile(logFile, 'utf8');
+    const lines = content.replace(/\r\n/g, '\n').split('\n');
+    const trailingEmpty = lines.at(-1) === '' ? 1 : 0;
+    return lines.slice(Math.max(0, lines.length - trailingEmpty - lineCount), lines.length - trailingEmpty).join('\n');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return '';
+    throw error;
+  }
+}
 
 function createSlackAfkApp({
   config,
@@ -67,6 +81,27 @@ function createSlackAfkApp({
     }
   });
 
+  receiver.app.get('/logs', async (req, res) => {
+    if (!config.logAccessKey) {
+      res.status(404).type('text/plain').send('Logs endpoint is disabled.');
+      return;
+    }
+
+    if (req.query.key !== config.logAccessKey) {
+      res.status(403).type('text/plain').send('Forbidden');
+      return;
+    }
+
+    try {
+      const logFile = path.resolve(process.cwd(), 'logs/local-app.log');
+      const text = await readLastLogLines(logFile, 100);
+      res.type('text/plain').send(text);
+    } catch (error) {
+      logger.error('Logs endpoint failed', { error });
+      res.status(500).type('text/plain').send('Could not read logs.');
+    }
+  });
+
   if (statusManager.oauthManager) {
     statusManager.oauthManager.registerRoutes(receiver.app);
   }
@@ -88,14 +123,24 @@ function createSlackAfkApp({
     return result === 'OK';
   }
 
+  function isBotMessage(event, botUserId) {
+    return Boolean(
+      event.subtype ||
+        event.bot_id ||
+        event.app_id ||
+        event.bot_profile ||
+        (botUserId && event.user === botUserId)
+    );
+  }
+
   async function processMessage({ event, client, botUserId, source }) {
-    if (!event || event.channel !== config.afkChannelId || event.subtype || event.bot_id) {
+    if (!event || event.channel !== config.afkChannelId || isBotMessage(event, botUserId)) {
       return;
     }
 
     const text = event.text || '';
     const userId = event.user;
-    if (!userId || userId === botUserId) return;
+    if (!userId) return;
 
     const shouldProcess = await markProcessed(event, source);
     if (!shouldProcess) return;
@@ -128,6 +173,10 @@ function createSlackAfkApp({
     }
   }
 
+  function replyThreadTs(event) {
+    return event.thread_ts || event.ts;
+  }
+
   async function handleCommand({ command, client, event, userId }) {
     const limit = await consumeCommand(rateLimiter, userId);
     if (!limit.allowed) {
@@ -153,6 +202,7 @@ function createSlackAfkApp({
       await statusManager.clearAfk(userId);
       await client.chat.postMessage({
         channel: event.channel,
+        thread_ts: replyThreadTs(event),
         text: messages.back(userId)
       });
       logger.info('AFK session cleared manually', { userId });
@@ -175,11 +225,12 @@ function createSlackAfkApp({
       await sessionStore.set(updated);
       await scheduleAutoReturn(userId, expiresAt);
       const statusResult = await statusManager.setAfk(userId, expiresAt, existing.reason, existing.statusEmoji);
-      await maybeSendStatusConnectPrompt({ statusResult, client, event, userId });
       await client.chat.postMessage({
         channel: event.channel,
+        thread_ts: replyThreadTs(event),
         text: messages.afkExtended(command.durationMs)
       });
+      await maybeSendStatusConnectPrompt({ statusResult, client, event, userId });
       logger.info('AFK session extended', { userId, expiresAt });
       return;
     }
@@ -208,11 +259,12 @@ function createSlackAfkApp({
     await sessionStore.set(session);
     await scheduleAutoReturn(userId, expiresAt);
     const statusResult = await statusManager.setAfk(userId, expiresAt, command.reason, command.statusEmoji);
-    await maybeSendStatusConnectPrompt({ statusResult, client, event, userId });
     await client.chat.postMessage({
       channel: event.channel,
+      thread_ts: replyThreadTs(event),
       text: messages.afkUpdated(command.durationMs)
     });
+    await maybeSendStatusConnectPrompt({ statusResult, client, event, userId });
     logger.info('AFK session started', { userId, expiresAt });
   }
 
@@ -315,4 +367,4 @@ function createSlackAfkApp({
   return { app, receiver, processMessage, startHistoryPolling };
 }
 
-module.exports = { createSlackAfkApp };
+module.exports = { createSlackAfkApp, readLastLogLines };

@@ -212,6 +212,8 @@ Set `SLACK_OAUTH_REDIRECT_URI` in `.env` to the same OAuth redirect URL and rest
 
 Target: Oracle VM, AWS EC2, or any Linux host with Docker and Docker Compose.
 
+For the GitHub Actions deployment path used by the Oracle server, see [`ORACLE_DEPLOY.md`](ORACLE_DEPLOY.md).
+
 1. Open only ports `80` and `443` in the cloud firewall/security group.
 2. Install Docker and Compose.
 3. Create `.env` from `.env.example`.
