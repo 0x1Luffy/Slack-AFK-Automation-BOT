@@ -5,6 +5,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - /opt/slack-afk-bot/logs:/app/logs
     security_opt:
       - no-new-privileges:true
     cap_drop:
