@@ -229,7 +229,9 @@ test('afk confirmation is sent before status connection prompt', async () => {
   });
 
   assert.equal(testApp.posts[0].text, '✅ AFK status updated for 5 mins');
+  assert.equal(testApp.posts[0].method, 'postMessage');
   assert.match(testApp.posts[1].text, /connect once/);
+  assert.equal(testApp.posts[1].method, 'postEphemeral');
 });
 
 test('readLastLogLines returns the last requested lines', async () => {

@@ -173,9 +173,10 @@ function createSlackAfkApp({
   });
 
   async function markProcessed(event, source) {
-    if (!event.ts) return true;
+    const messageTs = event.ts || event.message_ts;
+    if (!messageTs) return true;
 
-    const result = await redis.set(`afk:processed-message:${event.channel}:${event.ts}`, source, 'EX', 86400, 'NX');
+    const result = await redis.set(`afk:processed-message:${event.channel}:${messageTs}`, source, 'EX', 86400, 'NX');
     return result === 'OK';
   }
 
@@ -230,7 +231,7 @@ function createSlackAfkApp({
   }
 
   function replyThreadTs(event) {
-    return event.thread_ts || event.ts;
+    return event.thread_ts || event.ts || event.message_ts;
   }
 
   async function handleCommand({ command, client, event, userId }) {
@@ -239,7 +240,7 @@ function createSlackAfkApp({
       if (event.source === 'history-poller') {
         await client.chat.postMessage({
           channel: event.channel,
-          thread_ts: event.ts,
+          thread_ts: replyThreadTs(event),
           text: messages.rateLimitedPublic(userId, limit.retryAfterSeconds)
         });
       } else {
@@ -270,7 +271,7 @@ function createSlackAfkApp({
       if (!existing) {
         await client.chat.postMessage({
           channel: event.channel,
-          thread_ts: event.ts,
+          thread_ts: replyThreadTs(event),
           text: messages.notAfk(userId)
         });
         return;
@@ -295,7 +296,7 @@ function createSlackAfkApp({
     if (existing) {
       await client.chat.postMessage({
         channel: event.channel,
-        thread_ts: event.ts,
+        thread_ts: replyThreadTs(event),
         text: messages.alreadyAfk(userId)
       });
       return;
@@ -327,9 +328,10 @@ function createSlackAfkApp({
   async function maybeSendStatusConnectPrompt({ statusResult, client, event, userId }) {
     if (!statusResult || statusResult.ok || statusResult.reason !== 'missing_user_oauth') return;
 
-    await client.chat.postMessage({
+    await client.chat.postEphemeral({
       channel: event.channel,
-      thread_ts: event.ts,
+      thread_ts: replyThreadTs(event),
+      user: userId,
       text: messages.statusConnectPrompt(userId, statusResult.connectUrl)
     });
   }
@@ -347,7 +349,7 @@ function createSlackAfkApp({
 
     await client.chat.postMessage({
       channel: event.channel,
-      thread_ts: event.ts,
+      thread_ts: replyThreadTs(event),
       text: replies.join('\n')
     });
   }
