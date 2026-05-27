@@ -5,7 +5,7 @@ This deploy path keeps production secrets on the Oracle server and uses GitHub A
 Server:
 
 ```text
-ubuntu@140.238.229.225
+ubuntu@IP
 ```
 
 ## What Runs Where
@@ -23,7 +23,7 @@ ubuntu@140.238.229.225
 SSH into the server:
 
 ```bash
-ssh ubuntu@140.238.229.225
+ssh ubuntu@IP
 ```
 
 Install Git and Docker Engine:
@@ -119,7 +119,7 @@ ssh-keygen -t ed25519 -C "github-actions-slack-afk" -f ~/.ssh/slack_afk_oracle_d
 Copy the public key to the server:
 
 ```bash
-ssh-copy-id -i ~/.ssh/slack_afk_oracle_deploy.pub ubuntu@140.238.229.225
+ssh-copy-id -i ~/.ssh/slack_afk_oracle_deploy.pub ubuntu@IP
 ```
 
 In GitHub, open the repo:
@@ -131,7 +131,7 @@ Settings -> Secrets and variables -> Actions
 Add these repository secrets:
 
 ```text
-ORACLE_HOST=140.238.229.225
+ORACLE_HOST=IP
 ORACLE_USER=ubuntu
 ORACLE_PORT=22
 ORACLE_SSH_KEY=<contents of ~/.ssh/slack_afk_oracle_deploy>
@@ -170,7 +170,7 @@ docker compose -f docker-compose.yml -f docker-compose.server.yml up -d --remove
 SSH into the server:
 
 ```bash
-ssh ubuntu@140.238.229.225
+ssh ubuntu@IP
 ```
 
 Check containers:
