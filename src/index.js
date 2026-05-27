@@ -13,7 +13,7 @@ const { SlackOAuthManager } = require('./oauth');
 
 async function main() {
   const config = loadConfig();
-  const logger = createLogger({ env: config.env, level: config.logLevel });
+  const logger = createLogger({ env: config.env, level: config.logLevel, filePath: config.logFilePath });
   const redis = createRedisClient(config.redisUrl, logger, 'afk-primary');
   const queueConnection = createRedisClient(config.redisUrl, logger, 'afk-queue');
   const sessionStore = new SessionStore(redis);

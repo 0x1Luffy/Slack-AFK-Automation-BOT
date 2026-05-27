@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const winston = require('winston');
 
 const SENSITIVE_KEY = /(token|secret|password|authorization|cookie|key)/i;
@@ -34,7 +36,7 @@ function redactValue(value, seen = new WeakSet()) {
   );
 }
 
-function createLogger({ env, level }) {
+function createLogger({ env, level, filePath }) {
   const redactFormat = winston.format((info) => {
     for (const [key, value] of Object.entries(info)) {
       info[key] = SENSITIVE_KEY.test(key) ? '[REDACTED]' : redactValue(value);
@@ -53,10 +55,25 @@ function createLogger({ env, level }) {
           })
         );
 
+  const transports = [new winston.transports.Console()];
+
+  if (filePath) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    transports.push(
+      new winston.transports.File({
+        filename: filePath,
+        level,
+        maxsize: 10 * 1024 * 1024,
+        maxFiles: 5,
+        tailable: true
+      })
+    );
+  }
+
   return winston.createLogger({
     level,
     format: winston.format.combine(...base, output),
-    transports: [new winston.transports.Console()]
+    transports
   });
 }
 

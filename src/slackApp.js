@@ -150,7 +150,7 @@ function createSlackAfkApp({
     }
 
     try {
-      const logFile = path.resolve(process.cwd(), 'logs/local-app.log');
+      const logFile = config.logFilePath || path.resolve(process.cwd(), 'logs/local-app.log');
       if (req.query.format === 'text') {
         const text = await readLastLogLines(logFile, 100);
         res.type('text/plain').send(text);
