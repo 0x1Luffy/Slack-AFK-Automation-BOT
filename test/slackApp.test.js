@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { createSlackAfkApp, readLastLogLines } = require('../src/slackApp');
+const { createSlackAfkApp, parseLogLine, readLastLogEntries, readLastLogLines } = require('../src/slackApp');
 
 function createLogger() {
   return {
@@ -249,4 +249,45 @@ test('readLastLogLines returns empty text when log file is missing', async () =>
   const result = await readLastLogLines('/tmp/does-not-exist-local-app.log', 100);
 
   assert.equal(result, '');
+});
+
+test('parseLogLine parses production JSON log lines', () => {
+  const entry = parseLogLine(
+    '{"level":"info","message":"Slack AFK bot started","port":3000,"timestamp":"2026-05-27T04:37:15.841Z"}'
+  );
+
+  assert.equal(entry.level, 'info');
+  assert.equal(entry.message, 'Slack AFK bot started');
+  assert.equal(entry.port, 3000);
+  assert.equal(entry.timestamp, '2026-05-27T04:37:15.841Z');
+});
+
+test('parseLogLine parses colored development log lines', () => {
+  const entry = parseLogLine(
+    '2026-05-27T04:37:15.841Z \u001b[32minfo\u001b[39m: Slack AFK bot started {"port":3000,"env":"development"}'
+  );
+
+  assert.equal(entry.level, 'info');
+  assert.equal(entry.message, 'Slack AFK bot started');
+  assert.equal(entry.port, 3000);
+  assert.equal(entry.env, 'development');
+});
+
+test('readLastLogEntries returns parsed objects', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'afk-log-entries-'));
+  const file = path.join(dir, 'local-app.log');
+  await fs.writeFile(
+    file,
+    [
+      '{"level":"info","message":"one","timestamp":"2026-05-27T00:00:00.000Z"}',
+      '2026-05-27T00:00:01.000Z info: two {"port":3000}'
+    ].join('\n')
+  );
+
+  const entries = await readLastLogEntries(file, 100);
+
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].message, 'one');
+  assert.equal(entries[1].message, 'two');
+  assert.equal(entries[1].port, 3000);
 });

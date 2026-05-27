@@ -195,6 +195,12 @@ set +a
 curl "http://127.0.0.1:3000/logs?key=$LOG_ACCESS_KEY"
 ```
 
+Plain text logs are also available:
+
+```bash
+curl "http://127.0.0.1:3000/logs?key=$LOG_ACCESS_KEY&format=text"
+```
+
 ## HTTPS For Slack
 
 Slack needs HTTPS. The GitHub Action deploys the app on local port `3000`; expose it with Cloudflare Tunnel or another HTTPS proxy.

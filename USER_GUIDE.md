@@ -570,10 +570,16 @@ Check app health:
 curl http://localhost:3000/health
 ```
 
-View the last 100 local app log lines:
+View the last 100 local app log lines as JSON:
 
 ```bash
 curl "http://localhost:3000/logs?key=$LOG_ACCESS_KEY"
+```
+
+View plain text logs:
+
+```bash
+curl "http://localhost:3000/logs?key=$LOG_ACCESS_KEY&format=text"
 ```
 
 The `/logs` endpoint reads `logs/local-app.log` and only works when `LOG_ACCESS_KEY` is set in `.env`.

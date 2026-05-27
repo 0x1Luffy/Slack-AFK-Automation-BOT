@@ -20,6 +20,53 @@ async function readLastLogLines(logFile, lineCount = 100) {
   }
 }
 
+function stripAnsi(value) {
+  return String(value).replace(/\u001b\[[0-9;]*m/g, '');
+}
+
+function parseLogLine(line) {
+  const clean = stripAnsi(line).trim();
+  if (!clean) return null;
+
+  try {
+    const parsed = JSON.parse(clean);
+    return { raw: line, ...parsed };
+  } catch {
+    // Fall through to the development printf format.
+  }
+
+  const match = /^(\S+)\s+(\w+):\s+(.+?)(?:\s+(\{.*\}))?$/.exec(clean);
+  if (!match) {
+    return { level: 'raw', message: clean, raw: line };
+  }
+
+  const [, timestamp, level, message, metaText] = match;
+  let meta = {};
+  if (metaText) {
+    try {
+      meta = JSON.parse(metaText);
+    } catch {
+      meta = { meta: metaText };
+    }
+  }
+
+  return {
+    timestamp,
+    level,
+    message,
+    ...meta,
+    raw: line
+  };
+}
+
+async function readLastLogEntries(logFile, lineCount = 100) {
+  const text = await readLastLogLines(logFile, lineCount);
+  return text
+    .split('\n')
+    .map(parseLogLine)
+    .filter(Boolean);
+}
+
 function createSlackAfkApp({
   config,
   logger,
@@ -94,8 +141,17 @@ function createSlackAfkApp({
 
     try {
       const logFile = path.resolve(process.cwd(), 'logs/local-app.log');
-      const text = await readLastLogLines(logFile, 100);
-      res.type('text/plain').send(text);
+      if (req.query.format === 'text') {
+        const text = await readLastLogLines(logFile, 100);
+        res.type('text/plain').send(text);
+        return;
+      }
+
+      const entries = await readLastLogEntries(logFile, 100);
+      res.json({
+        count: entries.length,
+        lines: entries
+      });
     } catch (error) {
       logger.error('Logs endpoint failed', { error });
       res.status(500).type('text/plain').send('Could not read logs.');
@@ -367,4 +423,4 @@ function createSlackAfkApp({
   return { app, receiver, processMessage, startHistoryPolling };
 }
 
-module.exports = { createSlackAfkApp, readLastLogLines };
+module.exports = { createSlackAfkApp, parseLogLine, readLastLogEntries, readLastLogLines, stripAnsi };
