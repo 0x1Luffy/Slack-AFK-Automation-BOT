@@ -55,6 +55,8 @@ function loadConfig() {
     port: readInteger('PORT', 3000, { min: 1, max: 65535 }),
     logLevel: process.env.LOG_LEVEL || 'info',
     logAccessKey: process.env.LOG_ACCESS_KEY || '',
+    logsUsername: process.env.LOGS_USERNAME || '',
+    logsPassword: process.env.LOGS_PASSWORD || '',
     logFilePath: process.env.LOG_FILE_PATH
       ? path.resolve(process.env.LOG_FILE_PATH)
       : path.resolve(process.cwd(), 'logs/local-app.log'),

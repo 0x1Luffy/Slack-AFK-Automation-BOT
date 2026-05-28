@@ -77,6 +77,17 @@ async function readLastLogEntries(logFile, lineCount = 100) {
     .filter(Boolean);
 }
 
+function parseBasicAuth(header) {
+  if (!header || !header.startsWith('Basic ')) return null;
+  const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+  const index = decoded.indexOf(':');
+  if (index < 0) return null;
+  return {
+    username: decoded.slice(0, index),
+    password: decoded.slice(index + 1)
+  };
+}
+
 function createSlackAfkApp({
   config,
   logger,
@@ -164,6 +175,29 @@ function createSlackAfkApp({
       });
     } catch (error) {
       logger.error('Logs endpoint failed', { error });
+      res.status(500).type('text/plain').send('Could not read logs.');
+    }
+  });
+
+  receiver.app.get('/logs/view', async (req, res) => {
+    if (!config.logsUsername || !config.logsPassword) {
+      res.status(404).type('text/plain').send('Logs view is disabled.');
+      return;
+    }
+
+    const auth = parseBasicAuth(req.headers.authorization);
+    if (!auth || auth.username !== config.logsUsername || auth.password !== config.logsPassword) {
+      res.set('WWW-Authenticate', 'Basic realm="Logs"');
+      res.status(401).type('text/plain').send('Unauthorized');
+      return;
+    }
+
+    try {
+      const logFile = config.logFilePath || path.resolve(process.cwd(), 'logs/local-app.log');
+      const text = await readLastLogLines(logFile, 100);
+      res.type('text/plain').send(text);
+    } catch (error) {
+      logger.error('Logs view failed', { error });
       res.status(500).type('text/plain').send('Could not read logs.');
     }
   });
