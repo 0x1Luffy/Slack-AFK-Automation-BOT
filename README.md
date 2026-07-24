@@ -4,6 +4,8 @@ Production-ready Slack AFK status automation for an organization workspace. The 
 
 ## Architecture
 
+![Slack AFK Automation Bot Architecture](docs/assets/diagram.png)
+
 ```text
 Slack Events API
   -> Bolt HTTP receiver at /slack/events
