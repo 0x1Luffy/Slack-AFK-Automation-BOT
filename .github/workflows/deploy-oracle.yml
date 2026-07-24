@@ -408,6 +408,7 @@ jobs:
         run: |
           rm -rf "$ZAP_REPORT_DIR"
           mkdir -p "$ZAP_REPORT_DIR"
+          chmod 777 "$ZAP_REPORT_DIR"
 
       - name: Resolve ZAP scan URL
         run: |
@@ -530,12 +531,28 @@ jobs:
               const risk = String(alert.riskcode ?? '').trim();
               const riskDescription = String(alert.riskdesc ?? '').toLowerCase();
               if (risk === '3' || riskDescription.startsWith('high')) {
-                highAlerts.push(alert);
+                highAlerts.push({
+                  name: alert.alert || alert.name || 'Unknown alert',
+                  risk: alert.riskdesc || alert.risk || 'High',
+                  url: Array.isArray(alert.instances) && alert.instances[0]?.uri ? alert.instances[0].uri : site['@name'] || 'Unknown URL',
+                });
               }
             }
           }
           if (highAlerts.length > 0) {
             console.error(`::error::OWASP ZAP found ${highAlerts.length} HIGH-risk alert(s).`);
+            for (const alert of highAlerts) {
+              console.error(`::error title=OWASP ZAP HIGH-risk finding::${alert.name} (${alert.risk}) at ${alert.url}`);
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+              '',
+              '### OWASP ZAP HIGH-risk findings',
+              '',
+              '| Alert | Risk | URL |',
+              '| --- | --- | --- |',
+              ...highAlerts.map((alert) => `| ${alert.name} | ${alert.risk} | ${alert.url} |`),
+              '',
+            ].join('\n'));
             process.exit(1);
           }
           console.log('OWASP ZAP found no HIGH-risk alerts.');
@@ -567,8 +584,19 @@ jobs:
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
-          test "$trivy_result" = "success"
-          test "$zap_result" = "success"
+          failed=0
+          if [ "$trivy_result" != "success" ]; then
+            echo "::error title=Security gate blocked deployment::Trivy Security Scan result was '$trivy_result'. Production deploy is blocked when Trivy reports CRITICAL vulnerabilities or the Trivy job cannot complete."
+            failed=1
+          fi
+          if [ "$zap_result" != "success" ]; then
+            echo "::error title=Security gate blocked deployment::OWASP ZAP Baseline result was '$zap_result'. Production deploy is blocked when ZAP reports HIGH-risk findings or the ZAP job cannot produce reports."
+            failed=1
+          fi
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Security quality gate passed."
 
   deploy:
     name: Deploy
