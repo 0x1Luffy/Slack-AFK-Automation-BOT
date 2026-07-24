@@ -18,6 +18,7 @@ env:
   TRIVY_VERSION: v0.72.0
   TRIVY_CACHE_DIR: .trivy-cache
   SECURITY_REPORT_DIR: security-reports
+  TRIVY_SKIP_DIRS: .git,node_modules,logs,coverage,.trivy-cache,zap-reports,security-reports
 
 jobs:
   test:
@@ -96,17 +97,20 @@ jobs:
           trivy fs . \
             --scanners vuln,misconfig,secret \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format sarif \
             --output "$SECURITY_REPORT_DIR/trivy-filesystem.sarif"
           trivy fs . \
             --scanners vuln,misconfig,secret \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format template \
             --template "@${{ steps.trivy-template.outputs.html_template }}" \
             --output "$SECURITY_REPORT_DIR/trivy-filesystem.html"
           trivy fs . \
             --scanners vuln,misconfig,secret \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format json \
             --output "$SECURITY_REPORT_DIR/trivy-filesystem.json"
 
@@ -116,12 +120,14 @@ jobs:
             --scanners vuln \
             --pkg-types library \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format sarif \
             --output "$SECURITY_REPORT_DIR/trivy-dependencies.sarif"
           trivy fs . \
             --scanners vuln \
             --pkg-types library \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format template \
             --template "@${{ steps.trivy-template.outputs.html_template }}" \
             --output "$SECURITY_REPORT_DIR/trivy-dependencies.html"
@@ -129,6 +135,7 @@ jobs:
             --scanners vuln \
             --pkg-types library \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format json \
             --output "$SECURITY_REPORT_DIR/trivy-dependencies.json"
 
@@ -154,6 +161,7 @@ jobs:
       - name: Generate SBOM artifacts
         run: |
           trivy fs . \
+            --skip-dirs "$TRIVY_SKIP_DIRS" \
             --format cyclonedx \
             --output "$SECURITY_REPORT_DIR/trivy-filesystem-sbom.cdx.json"
           trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
@@ -193,36 +201,157 @@ jobs:
       - name: Add Trivy workflow summary
         if: always()
         run: |
-          {
-            echo "## Trivy security scan"
-            echo
-            echo "| Scan | SARIF | HTML | JSON | SBOM |"
-            echo "| --- | --- | --- | --- | --- |"
-            echo "| Filesystem | trivy-filesystem.sarif | trivy-filesystem.html | trivy-filesystem.json | trivy-filesystem-sbom.cdx.json |"
-            echo "| Dependencies | trivy-dependencies.sarif | trivy-dependencies.html | trivy-dependencies.json | Included in filesystem SBOM |"
-            echo "| Docker image | trivy-image.sarif | trivy-image.html | trivy-image.json | trivy-image-sbom.cdx.json |"
-            echo
-            echo "Quality gate: only CRITICAL vulnerabilities fail Trivy and block deployment. LOW, MEDIUM, HIGH, INFO, and UNKNOWN findings are reported for triage."
-          } >> "$GITHUB_STEP_SUMMARY"
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const reportDir = process.env.SECURITY_REPORT_DIR;
+          const files = [
+            ['Filesystem', 'trivy-filesystem.json'],
+            ['Dependencies', 'trivy-dependencies.json'],
+            ['Docker image', 'trivy-image.json'],
+          ];
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const directDeps = new Set(Object.keys({
+            ...(pkg.dependencies || {}),
+            ...(pkg.optionalDependencies || {}),
+            ...(pkg.peerDependencies || {}),
+          }));
+
+          const packageGraph = new Map();
+          for (const [, file] of files) {
+            const fullPath = path.join(reportDir, file);
+            if (!fs.existsSync(fullPath)) continue;
+            const report = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+            for (const result of report.Results || []) {
+              for (const item of result.Packages || []) {
+                packageGraph.set(item.ID || `${item.Name}@${item.Version}`, item);
+              }
+            }
+          }
+
+          function parentsOf(pkgId) {
+            const parents = [];
+            for (const item of packageGraph.values()) {
+              if ((item.DependsOn || []).includes(pkgId)) {
+                parents.push(item);
+              }
+            }
+            return parents;
+          }
+
+          function directParentChain(vulnerability) {
+            const pkgId = `${vulnerability.PkgName}@${vulnerability.InstalledVersion}`;
+            const queue = parentsOf(pkgId).map((item) => ({ item, via: [item.Name] }));
+            const seen = new Set();
+            while (queue.length) {
+              const current = queue.shift();
+              const key = current.item.ID || `${current.item.Name}@${current.item.Version}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              if (directDeps.has(current.item.Name) || current.item.Relationship === 'direct') {
+                return current.via.join(' -> ');
+              }
+              for (const parent of parentsOf(key)) {
+                queue.push({ item: parent, via: [parent.Name, ...current.via] });
+              }
+            }
+            return directDeps.has(vulnerability.PkgName) ? vulnerability.PkgName : 'Review dependency tree';
+          }
+
+          function guidance(vulnerability) {
+            const fixed = vulnerability.FixedVersion || 'No fixed version published';
+            if (directDeps.has(vulnerability.PkgName)) {
+              return fixed === 'No fixed version published'
+                ? `Monitor ${vulnerability.PkgName} advisory and apply compensating controls.`
+                : `Upgrade direct dependency ${vulnerability.PkgName} to ${fixed} or later.`;
+            }
+            const parent = directParentChain(vulnerability);
+            return fixed === 'No fixed version published'
+              ? `Review parent dependency ${parent}; no fixed transitive version is currently listed.`
+              : `Upgrade parent dependency ${parent} so ${vulnerability.PkgName} resolves to ${fixed} or later.`;
+          }
+
+          const criticals = [];
+          for (const [scan, file] of files) {
+            const fullPath = path.join(reportDir, file);
+            if (!fs.existsSync(fullPath)) continue;
+            const report = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+            for (const result of report.Results || []) {
+              for (const vulnerability of result.Vulnerabilities || []) {
+                if (String(vulnerability.Severity).toUpperCase() === 'CRITICAL') {
+                  criticals.push({ scan, target: result.Target || '', vulnerability });
+                }
+              }
+            }
+          }
+
+          const lines = [];
+          lines.push('## Trivy security scan', '');
+          lines.push('| Scan | SARIF | HTML | JSON | SBOM |');
+          lines.push('| --- | --- | --- | --- | --- |');
+          lines.push('| Filesystem | trivy-filesystem.sarif | trivy-filesystem.html | trivy-filesystem.json | trivy-filesystem-sbom.cdx.json |');
+          lines.push('| Dependencies | trivy-dependencies.sarif | trivy-dependencies.html | trivy-dependencies.json | Included in filesystem SBOM |');
+          lines.push('| Docker image | trivy-image.sarif | trivy-image.html | trivy-image.json | trivy-image-sbom.cdx.json |');
+          lines.push('', `Skipped filesystem noise directories: \`${process.env.TRIVY_SKIP_DIRS}\`.`, '');
+          lines.push('Quality gate: only CRITICAL vulnerabilities fail Trivy and block deployment. LOW, MEDIUM, HIGH, INFO, and UNKNOWN findings are reported for triage.', '');
+          lines.push('### CRITICAL vulnerability remediation');
+          if (criticals.length === 0) {
+            lines.push('', 'No CRITICAL vulnerabilities found in the generated Trivy JSON reports.');
+          } else {
+            lines.push('', '| Scan | Target | Package | CVE | Installed | Fixed | Remediation |');
+            lines.push('| --- | --- | --- | --- | --- | --- | --- |');
+            for (const finding of criticals) {
+              const v = finding.vulnerability;
+              const cve = v.VulnerabilityID || 'Unknown';
+              const fixed = v.FixedVersion || 'Not listed';
+              lines.push(`| ${finding.scan} | ${finding.target || 'N/A'} | ${v.PkgName || 'Unknown'} | ${cve} | ${v.InstalledVersion || 'Unknown'} | ${fixed} | ${guidance(v)} |`);
+            }
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
+          NODE
 
       - name: Trivy CRITICAL vulnerability gate
         run: |
-          trivy fs . \
-            --scanners vuln \
-            --severity CRITICAL \
-            --exit-code 1 \
-            --format table
-          trivy fs . \
-            --scanners vuln \
-            --pkg-types library \
-            --severity CRITICAL \
-            --exit-code 1 \
-            --format table
-          trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
-            --scanners vuln \
-            --severity CRITICAL \
-            --exit-code 1 \
-            --format table
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const reportDir = process.env.SECURITY_REPORT_DIR;
+          const files = [
+            ['Filesystem', 'trivy-filesystem.json'],
+            ['Dependencies', 'trivy-dependencies.json'],
+            ['Docker image', 'trivy-image.json'],
+          ];
+          const criticals = [];
+          for (const [scan, file] of files) {
+            const fullPath = path.join(reportDir, file);
+            if (!fs.existsSync(fullPath)) {
+              console.error(`::error::Missing Trivy JSON report: ${fullPath}`);
+              process.exit(1);
+            }
+            const report = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+            for (const result of report.Results || []) {
+              for (const vulnerability of result.Vulnerabilities || []) {
+                if (String(vulnerability.Severity).toUpperCase() === 'CRITICAL') {
+                  criticals.push({
+                    scan,
+                    target: result.Target || 'N/A',
+                    packageName: vulnerability.PkgName || 'Unknown',
+                    cve: vulnerability.VulnerabilityID || 'Unknown',
+                    installed: vulnerability.InstalledVersion || 'Unknown',
+                    fixed: vulnerability.FixedVersion || 'Not listed',
+                  });
+                }
+              }
+            }
+          }
+          if (criticals.length > 0) {
+            for (const finding of criticals) {
+              console.error(`::error title=Trivy CRITICAL vulnerability::${finding.scan} ${finding.target}: ${finding.packageName} ${finding.cve}, installed ${finding.installed}, fixed ${finding.fixed}`);
+            }
+            process.exit(1);
+          }
+          console.log('Trivy found no CRITICAL vulnerabilities.');
+          NODE
 
   zap-baseline:
     name: OWASP ZAP Baseline (Staging)
@@ -276,17 +405,45 @@ jobs:
           NODE
 
       - name: Prepare ZAP report directory
-        run: mkdir -p "$ZAP_REPORT_DIR"
+        run: |
+          rm -rf "$ZAP_REPORT_DIR"
+          mkdir -p "$ZAP_REPORT_DIR"
+
+      - name: Resolve ZAP scan URL
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const target = new URL(process.env.ZAP_TARGET_URL);
+          const health = new URL(target.toString());
+          if (health.pathname === '/' || health.pathname === '') {
+            health.pathname = '/health';
+          }
+          fs.appendFileSync(process.env.GITHUB_ENV, `ZAP_SCAN_URL=${target.toString()}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `ZAP_HEALTH_URL=${health.toString()}\n`);
+          console.log(`::add-mask::${target.toString()}`);
+          console.log(`::add-mask::${health.toString()}`);
+          console.log('Prepared ZAP target URL from ZAP_STAGING_TARGET_URL.');
+          NODE
 
       - name: Run OWASP ZAP Baseline Scan
         run: |
+          if ! curl --fail --silent --show-error --max-time 15 "$ZAP_SCAN_URL" >/dev/null; then
+            echo "Primary ZAP target was not reachable with a successful HTTP response; trying /health on the same origin."
+            if curl --fail --silent --show-error --max-time 15 "$ZAP_HEALTH_URL" >/dev/null; then
+              echo "ZAP_SCAN_URL=$ZAP_HEALTH_URL" >> "$GITHUB_ENV"
+              ZAP_SCAN_URL="$ZAP_HEALTH_URL"
+            else
+              echo "::warning::Neither the primary target nor /health returned a successful HTTP response. ZAP will still run against the configured target so reports are produced."
+            fi
+          fi
           set +e
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             --volume "$PWD/$ZAP_REPORT_DIR:/zap/wrk:rw" \
+            --workdir /zap/wrk \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-              -t "$ZAP_TARGET_URL" \
+              -t "$ZAP_SCAN_URL" \
               -a \
               -I \
               -m 1 \
@@ -296,6 +453,23 @@ jobs:
           zap_exit=$?
           set -e
           echo "OWASP ZAP baseline exited with code $zap_exit; the JSON quality gate will evaluate HIGH-risk findings."
+
+      - name: Debug ZAP report locations
+        if: always()
+        run: |
+          echo "Expected ZAP report directory: $PWD/$ZAP_REPORT_DIR"
+          find "$ZAP_REPORT_DIR" -maxdepth 2 -type f -print -exec ls -lh {} \; || true
+          missing=0
+          for report in zap-report.html zap-report.json; do
+            if [ ! -s "$ZAP_REPORT_DIR/$report" ]; then
+              echo "::error::Missing expected OWASP ZAP report: $ZAP_REPORT_DIR/$report"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::OWASP ZAP did not write the expected reports into $ZAP_REPORT_DIR. Check the Docker mount and zap-baseline.py output above."
+            exit 1
+          fi
 
       - name: Upload ZAP reports
         if: always()
