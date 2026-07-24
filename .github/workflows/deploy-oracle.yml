@@ -6,20 +6,32 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: oracle-production
+  group: oracle-production-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  IMAGE_NAME: slack-afk-automation-bot
+  TRIVY_VERSION: v0.72.0
+  TRIVY_CACHE_DIR: .trivy-cache
+  SECURITY_REPORT_DIR: security-reports
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -30,10 +42,347 @@ jobs:
       - name: Run tests
         run: npm test
 
+  trivy-security:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Set up Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Cache Trivy vulnerability database
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-
+            trivy-db-${{ runner.os }}-
+
+      - name: Prepare report directory
+        run: mkdir -p "$SECURITY_REPORT_DIR"
+
+      - name: Build Docker image for scanning
+        run: |
+          docker buildx build \
+            --load \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --tag "$IMAGE_NAME:${GITHUB_SHA}" \
+            .
+
+      - name: Locate Trivy HTML template
+        id: trivy-template
+        run: |
+          template_path="$(find "$HOME/.local/bin/trivy-bin" -path '*/contrib/html.tpl' -print -quit)"
+          test -n "$template_path"
+          echo "html_template=$template_path" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Trivy filesystem reports
+        run: |
+          trivy fs . \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif \
+            --output "$SECURITY_REPORT_DIR/trivy-filesystem.sarif"
+          trivy fs . \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format template \
+            --template "@${{ steps.trivy-template.outputs.html_template }}" \
+            --output "$SECURITY_REPORT_DIR/trivy-filesystem.html"
+          trivy fs . \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format json \
+            --output "$SECURITY_REPORT_DIR/trivy-filesystem.json"
+
+      - name: Generate Trivy dependency reports
+        run: |
+          trivy fs . \
+            --scanners vuln \
+            --pkg-types library \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif \
+            --output "$SECURITY_REPORT_DIR/trivy-dependencies.sarif"
+          trivy fs . \
+            --scanners vuln \
+            --pkg-types library \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format template \
+            --template "@${{ steps.trivy-template.outputs.html_template }}" \
+            --output "$SECURITY_REPORT_DIR/trivy-dependencies.html"
+          trivy fs . \
+            --scanners vuln \
+            --pkg-types library \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format json \
+            --output "$SECURITY_REPORT_DIR/trivy-dependencies.json"
+
+      - name: Generate Trivy Docker image reports
+        run: |
+          trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif \
+            --output "$SECURITY_REPORT_DIR/trivy-image.sarif"
+          trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format template \
+            --template "@${{ steps.trivy-template.outputs.html_template }}" \
+            --output "$SECURITY_REPORT_DIR/trivy-image.html"
+          trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format json \
+            --output "$SECURITY_REPORT_DIR/trivy-image.json"
+
+      - name: Generate SBOM artifacts
+        run: |
+          trivy fs . \
+            --format cyclonedx \
+            --output "$SECURITY_REPORT_DIR/trivy-filesystem-sbom.cdx.json"
+          trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
+            --format cyclonedx \
+            --output "$SECURITY_REPORT_DIR/trivy-image-sbom.cdx.json"
+
+      - name: Publish filesystem SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: ${{ env.SECURITY_REPORT_DIR }}/trivy-filesystem.sarif
+          category: trivy-filesystem
+
+      - name: Publish dependency SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: ${{ env.SECURITY_REPORT_DIR }}/trivy-dependencies.sarif
+          category: trivy-dependencies
+
+      - name: Publish Docker image SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          sarif_file: ${{ env.SECURITY_REPORT_DIR }}/trivy-image.sarif
+          category: trivy-image
+
+      - name: Upload Trivy reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-security-reports
+          path: ${{ env.SECURITY_REPORT_DIR }}/trivy-*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Add Trivy workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Trivy security scan"
+            echo
+            echo "| Scan | SARIF | HTML | JSON | SBOM |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| Filesystem | trivy-filesystem.sarif | trivy-filesystem.html | trivy-filesystem.json | trivy-filesystem-sbom.cdx.json |"
+            echo "| Dependencies | trivy-dependencies.sarif | trivy-dependencies.html | trivy-dependencies.json | Included in filesystem SBOM |"
+            echo "| Docker image | trivy-image.sarif | trivy-image.html | trivy-image.json | trivy-image-sbom.cdx.json |"
+            echo
+            echo "Quality gate: only CRITICAL vulnerabilities fail Trivy and block deployment. LOW, MEDIUM, HIGH, INFO, and UNKNOWN findings are reported for triage."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trivy CRITICAL vulnerability gate
+        run: |
+          trivy fs . \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --format table
+          trivy fs . \
+            --scanners vuln \
+            --pkg-types library \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --format table
+          trivy image "$IMAGE_NAME:${GITHUB_SHA}" \
+            --scanners vuln \
+            --severity CRITICAL \
+            --exit-code 1 \
+            --format table
+
+  zap-baseline:
+    name: OWASP ZAP Baseline (Staging)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      ZAP_TARGET_URL: ${{ secrets.ZAP_STAGING_TARGET_URL }}
+      PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+      ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+      ZAP_REPORT_DIR: zap-reports
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate non-production ZAP target
+        run: |
+          test -n "$ZAP_TARGET_URL"
+          echo "::add-mask::$ZAP_TARGET_URL"
+          if [ -n "$PRODUCTION_URL" ]; then
+            echo "::add-mask::$PRODUCTION_URL"
+          fi
+          if [ -n "$ORACLE_HOST" ]; then
+            echo "::add-mask::$ORACLE_HOST"
+          fi
+          node <<'NODE'
+          const target = process.env.ZAP_TARGET_URL;
+          const prod = process.env.PRODUCTION_URL || '';
+          const oracleHost = process.env.ORACLE_HOST || '';
+          const fail = (message) => {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          };
+          let targetUrl;
+          try {
+            targetUrl = new URL(target);
+          } catch {
+            fail('ZAP_STAGING_TARGET_URL must be a valid absolute URL.');
+          }
+          if (!['http:', 'https:'].includes(targetUrl.protocol)) {
+            fail('ZAP_STAGING_TARGET_URL must use http or https.');
+          }
+          if (prod && target.replace(/\/+$/, '') === prod.replace(/\/+$/, '')) {
+            fail('ZAP target matches PRODUCTION_URL. Refusing to scan production.');
+          }
+          if (oracleHost && targetUrl.hostname === oracleHost) {
+            fail('ZAP target hostname matches ORACLE_HOST. Refusing to scan production.');
+          }
+          NODE
+
+      - name: Prepare ZAP report directory
+        run: mkdir -p "$ZAP_REPORT_DIR"
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@2b5fc7f98d837319798ab7f128ea50b7d40563b6 # v0.14.0
+        with:
+          target: ${{ secrets.ZAP_STAGING_TARGET_URL }}
+          fail_action: false
+          allow_issue_writing: false
+          artifact_name: zap-baseline-action-reports
+          cmd_options: -a -J zap-report.json -w zap-report.md -r zap-report.html
+
+      - name: Collect ZAP reports
+        if: always()
+        run: |
+          find . -maxdepth 2 \( -name 'zap-report.*' -o -name 'report_*' \) -type f -print -exec cp {} "$ZAP_REPORT_DIR/" \;
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zap-baseline-security-reports
+          path: ${{ env.ZAP_REPORT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Add ZAP workflow summary
+        if: always()
+        run: |
+          {
+            echo "## OWASP ZAP baseline scan"
+            echo
+            echo "Target: staging/test URL from \`secrets.ZAP_STAGING_TARGET_URL\`."
+            echo
+            echo "| Report | File |"
+            echo "| --- | --- |"
+            echo "| HTML | zap-report.html |"
+            echo "| JSON | zap-report.json |"
+            echo "| Markdown | zap-report.md |"
+            echo
+            echo "Quality gate: only HIGH-risk ZAP findings block deployment. LOW, MEDIUM, and INFO alerts are reported for triage."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ZAP HIGH-risk finding gate
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = 'zap-reports/zap-report.json';
+          if (!fs.existsSync(path)) {
+            console.error('::error::Missing ZAP JSON report.');
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const sites = Array.isArray(report.site) ? report.site : [];
+          const highAlerts = [];
+          for (const site of sites) {
+            const alerts = Array.isArray(site.alerts) ? site.alerts : [];
+            for (const alert of alerts) {
+              const risk = String(alert.riskcode ?? '').trim();
+              const riskDescription = String(alert.riskdesc ?? '').toLowerCase();
+              if (risk === '3' || riskDescription.startsWith('high')) {
+                highAlerts.push(alert);
+              }
+            }
+          }
+          if (highAlerts.length > 0) {
+            console.error(`::error::OWASP ZAP found ${highAlerts.length} HIGH-risk alert(s).`);
+            process.exit(1);
+          }
+          console.log('OWASP ZAP found no HIGH-risk alerts.');
+          NODE
+
+  security-quality-gate:
+    name: Security Quality Gate
+    runs-on: ubuntu-latest
+    needs:
+      - trivy-security
+      - zap-baseline
+    timeout-minutes: 5
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Enforce deployment security gate
+        run: |
+          trivy_result='${{ needs.trivy-security.result }}'
+          zap_result='${{ needs.zap-baseline.result }}'
+
+          {
+            echo "## Security quality gate"
+            echo
+            echo "| Gate | Result | Blocks deployment when |"
+            echo "| --- | --- | --- |"
+            echo "| Trivy | $trivy_result | CRITICAL vulnerabilities are found |"
+            echo "| OWASP ZAP Baseline | $zap_result | HIGH-risk findings are found |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          test "$trivy_result" = "success"
+          test "$zap_result" = "success"
+
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    needs: test
+    needs: security-quality-gate
+    timeout-minutes: 20
+    permissions:
+      contents: read
     environment: production
     env:
       ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
