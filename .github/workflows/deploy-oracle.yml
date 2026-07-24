@@ -438,9 +438,7 @@ jobs:
           fi
           set +e
           docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            --volume "$PWD/$ZAP_REPORT_DIR:/zap/wrk:rw" \
-            --workdir /zap/wrk \
+            --volume "$PWD/$ZAP_REPORT_DIR:/zap/wrk/:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
               -t "$ZAP_SCAN_URL" \
@@ -452,12 +450,22 @@ jobs:
               -z "-config api.disablekey=true"
           zap_exit=$?
           set -e
+          sudo chown -R "$(id -u):$(id -g)" "$ZAP_REPORT_DIR" || true
           echo "OWASP ZAP baseline exited with code $zap_exit; the JSON quality gate will evaluate HIGH-risk findings."
 
       - name: Debug ZAP report locations
         if: always()
         run: |
           echo "Expected ZAP report directory: $PWD/$ZAP_REPORT_DIR"
+          echo "Workspace ZAP report search:"
+          find "$PWD" -maxdepth 4 \( -name 'zap-report.html' -o -name 'zap-report.json' \) -type f -print -exec ls -lh {} \; || true
+          for report in zap-report.html zap-report.json; do
+            found="$(find "$PWD" -maxdepth 4 -name "$report" -type f -print -quit)"
+            if [ -n "$found" ] && [ "$found" != "$PWD/$ZAP_REPORT_DIR/$report" ]; then
+              cp "$found" "$ZAP_REPORT_DIR/$report"
+            fi
+          done
+          echo "Files prepared for artifact upload:"
           find "$ZAP_REPORT_DIR" -maxdepth 2 -type f -print -exec ls -lh {} \; || true
           missing=0
           for report in zap-report.html zap-report.json; do
@@ -467,6 +475,14 @@ jobs:
             fi
           done
           if [ "$missing" -ne 0 ]; then
+            {
+              echo "OWASP ZAP report generation failed."
+              echo "Expected files:"
+              echo "- $ZAP_REPORT_DIR/zap-report.html"
+              echo "- $ZAP_REPORT_DIR/zap-report.json"
+              echo
+              echo "The workflow searched the workspace and could not find one or more expected reports."
+            } > "$ZAP_REPORT_DIR/zap-report-debug.txt"
             echo "::error::OWASP ZAP did not write the expected reports into $ZAP_REPORT_DIR. Check the Docker mount and zap-baseline.py output above."
             exit 1
           fi
@@ -476,7 +492,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zap-baseline-security-reports
-          path: ${{ env.ZAP_REPORT_DIR }}
+          path: ${{ env.ZAP_REPORT_DIR }}/**
           if-no-files-found: error
           retention-days: 30
 

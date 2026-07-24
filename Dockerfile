@@ -1,16 +1,15 @@
-FROM node:20-bookworm-slim AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends dumb-init ca-certificates \
-  && rm -rf /var/lib/apt/lists/* \
-  && groupadd --system --gid 10001 nodeapp \
-  && useradd --system --uid 10001 --gid nodeapp --home-dir /app nodeapp \
+RUN apk add --no-cache dumb-init ca-certificates \
+  && npm install -g npm@11.18.0 \
+  && addgroup -S -g 10001 nodeapp \
+  && adduser -S -u 10001 -G nodeapp -h /app nodeapp \
   && mkdir -p /app/logs \
   && chown -R nodeapp:nodeapp /app
 COPY --from=deps /app/node_modules ./node_modules
