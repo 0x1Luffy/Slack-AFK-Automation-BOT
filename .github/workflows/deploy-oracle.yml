@@ -279,18 +279,23 @@ jobs:
         run: mkdir -p "$ZAP_REPORT_DIR"
 
       - name: Run OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@2b5fc7f98d837319798ab7f128ea50b7d40563b6 # v0.14.0
-        with:
-          target: ${{ secrets.ZAP_STAGING_TARGET_URL }}
-          fail_action: false
-          allow_issue_writing: false
-          artifact_name: zap-baseline-action-reports
-          cmd_options: -a -J zap-report.json -w zap-report.md -r zap-report.html
-
-      - name: Collect ZAP reports
-        if: always()
         run: |
-          find . -maxdepth 2 \( -name 'zap-report.*' -o -name 'report_*' \) -type f -print -exec cp {} "$ZAP_REPORT_DIR/" \;
+          set +e
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD/$ZAP_REPORT_DIR:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t "$ZAP_TARGET_URL" \
+              -a \
+              -I \
+              -m 1 \
+              -r zap-report.html \
+              -J zap-report.json \
+              -z "-config api.disablekey=true"
+          zap_exit=$?
+          set -e
+          echo "OWASP ZAP baseline exited with code $zap_exit; the JSON quality gate will evaluate HIGH-risk findings."
 
       - name: Upload ZAP reports
         if: always()
@@ -313,7 +318,6 @@ jobs:
             echo "| --- | --- |"
             echo "| HTML | zap-report.html |"
             echo "| JSON | zap-report.json |"
-            echo "| Markdown | zap-report.md |"
             echo
             echo "Quality gate: only HIGH-risk ZAP findings block deployment. LOW, MEDIUM, and INFO alerts are reported for triage."
           } >> "$GITHUB_STEP_SUMMARY"

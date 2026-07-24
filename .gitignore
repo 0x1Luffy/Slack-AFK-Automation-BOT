@@ -37,3 +37,11 @@ cloudflared*
 .env.local
 *.pem
 *.key
+
+# ZAP reports
+zap-report.html
+zap-report.json
+zap-reports/
+
+# Trivy reports (optional if generated locally)
+security-reports/
