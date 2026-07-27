@@ -154,46 +154,78 @@ function createSlackAfkApp({
       const html = `<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Slack AFK Bot API</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Slack AFK Bot — API</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:32px;color:#222}
-      a{color:#0366d6}
-      .card{border:1px solid #e1e4e8;padding:16px;border-radius:6px;margin-bottom:12px}
-      h1{margin:0 0 8px 0}
-      p.lead{color:#586069}
+      :root{--bg:#f6f8fa;--card:#fff;--muted:#6b7280;--accent:#2563eb}
+      html,body{height:100%}
+      body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:0;background:var(--bg);color:#0f172a}
+      .wrap{max-width:980px;margin:48px auto;padding:24px}
+      header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+      h1{font-size:20px;margin:0}
+      p.lead{margin:6px 0 0;color:var(--muted)}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:20px}
+      .card{background:var(--card);border-radius:12px;padding:18px;box-shadow:0 1px 2px rgba(16,24,40,0.04);border:1px solid rgba(15,23,42,0.04)}
+      .card h3{margin:0 0 8px 0;font-size:15px}
+      .muted{color:var(--muted);font-size:13px}
+      a.link{display:inline-block;margin-top:8px;color:var(--accent);text-decoration:none;font-weight:600}
+      pre{background:#0b1220;color:#e6eef8;padding:12px;border-radius:8px;margin:12px 0;overflow:auto;font-size:13px}
+      footer{margin-top:28px;color:var(--muted);font-size:13px}
+      .logo{display:flex;align-items:center;gap:12px}
+      .logo svg{width:38px;height:38px}
     </style>
   </head>
   <body>
-    <h1>Slack AFK Bot — API</h1>
-    <p class="lead">Lightweight API surface for health, logs and status.</p>
+    <div class="wrap">
+      <header>
+        <div>
+          <div class="logo"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="24" height="24" rx="6" fill="#2563eb"/><path d="M7 12h10M7 8h10M7 16h6" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div>
+              <h1>Slack AFK Bot — API</h1>
+              <p class="lead">Simple endpoints for health, logs and status management.</p>
+            </div>
+          </div>
+        </div>
+        <div class="muted">v1 • lightweight</div>
+      </header>
 
-    <div class="card">
-      <strong>Health</strong>
-      <p>Check service health and metrics.</p>
-      <a href="/health">/health</a>
+      <div class="grid">
+        <div class="card">
+          <h3>Health</h3>
+          <div class="muted">Check service health and runtime metrics.</div>
+          <a class="link" href="/health">GET /health</a>
+          <pre>curl -sS --fail {{HOST}}/health | jq .</pre>
+        </div>
+
+        <div class="card">
+          <h3>Logs (JSON / text)</h3>
+          <div class="muted">Retrieve recent logs. When enabled, a query key is required.</div>
+          <a class="link" href="/logs">GET /logs</a>
+          <pre>curl -sS "{{HOST}}/logs?key=YOUR_KEY" | jq .</pre>
+        </div>
+
+        <div class="card">
+          <h3>Logs (browser view)</h3>
+          <div class="muted">Simple plaintext log view protected by basic auth when enabled.</div>
+          <a class="link" href="/logs/view">GET /logs/view</a>
+          <pre>open {{HOST}}/logs/view</pre>
+        </div>
+
+        <div class="card">
+          <h3>Slack OAuth</h3>
+          <div class="muted">OAuth connection routes are registered when Slack OAuth is configured.</div>
+          <div style="margin-top:8px;font-size:13px">If enabled, use the configured redirect URI to connect user tokens.</div>
+        </div>
+      </div>
+
+      <footer>
+        <div>Usage tips: replace <strong>{{HOST}}</strong> with your host (e.g. <code>https://example.com</code> or <code>http://localhost:3000</code>).</div>
+      </footer>
     </div>
-
-    <div class="card">
-      <strong>Logs (JSON / text)</strong>
-      <p>Retrieve recent logs. Requires the query key when enabled.</p>
-      <a href="/logs">/logs</a>
-      <span> — JSON by default; add <code>?format=text&amp;key=KEY</code> for plain text.</span>
-    </div>
-
-    <div class="card">
-      <strong>Logs (browser view)</strong>
-      <p>Simple browser view protected by basic auth when enabled.</p>
-      <a href="/logs/view">/logs/view</a>
-    </div>
-
-    <div class="card">
-      <strong>Slack OAuth</strong>
-      <p>OAuth connection routes (if configured) are registered under the app's OAuth manager.</p>
-    </div>
-
-    <footer style="margin-top:24px;color:#6a737d">Node.js Slack AFK Bot</footer>
   </body>
 </html>`;
       res.type('text/html').send(html);
