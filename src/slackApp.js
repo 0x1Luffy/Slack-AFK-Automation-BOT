@@ -149,6 +149,60 @@ function createSlackAfkApp({
     }
   });
 
+  receiver.app.get('/', async (_req, res) => {
+    try {
+      const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Slack AFK Bot API</title>
+    <style>
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:32px;color:#222}
+      a{color:#0366d6}
+      .card{border:1px solid #e1e4e8;padding:16px;border-radius:6px;margin-bottom:12px}
+      h1{margin:0 0 8px 0}
+      p.lead{color:#586069}
+    </style>
+  </head>
+  <body>
+    <h1>Slack AFK Bot — API</h1>
+    <p class="lead">Lightweight API surface for health, logs and status.</p>
+
+    <div class="card">
+      <strong>Health</strong>
+      <p>Check service health and metrics.</p>
+      <a href="/health">/health</a>
+    </div>
+
+    <div class="card">
+      <strong>Logs (JSON / text)</strong>
+      <p>Retrieve recent logs. Requires the query key when enabled.</p>
+      <a href="/logs">/logs</a>
+      <span> — JSON by default; add <code>?format=text&amp;key=KEY</code> for plain text.</span>
+    </div>
+
+    <div class="card">
+      <strong>Logs (browser view)</strong>
+      <p>Simple browser view protected by basic auth when enabled.</p>
+      <a href="/logs/view">/logs/view</a>
+    </div>
+
+    <div class="card">
+      <strong>Slack OAuth</strong>
+      <p>OAuth connection routes (if configured) are registered under the app's OAuth manager.</p>
+    </div>
+
+    <footer style="margin-top:24px;color:#6a737d">Node.js Slack AFK Bot</footer>
+  </body>
+</html>`;
+      res.type('text/html').send(html);
+    } catch (error) {
+      logger.error('Landing page render failed', { error });
+      res.status(500).type('text/plain').send('Server error');
+    }
+  });
+
   receiver.app.get('/logs', async (req, res) => {
     if (!config.logAccessKey) {
       res.status(404).type('text/plain').send('Logs endpoint is disabled.');
