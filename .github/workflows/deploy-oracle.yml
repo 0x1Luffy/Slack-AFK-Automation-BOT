@@ -50,7 +50,12 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+      packages: write
       security-events: write
+    outputs:
+      image: ${{ steps.push-scanned-image.outputs.image }}
+      digest: ${{ steps.push-scanned-image.outputs.digest }}
+      tag: ${{ steps.push-scanned-image.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -293,7 +298,7 @@ jobs:
           lines.push('| Dependencies | trivy-dependencies.sarif | trivy-dependencies.html | trivy-dependencies.json | Included in filesystem SBOM |');
           lines.push('| Docker image | trivy-image.sarif | trivy-image.html | trivy-image.json | trivy-image-sbom.cdx.json |');
           lines.push('', `Skipped filesystem noise directories: \`${process.env.TRIVY_SKIP_DIRS}\`.`, '');
-          lines.push('Quality gate: only CRITICAL vulnerabilities fail Trivy and block deployment. LOW, MEDIUM, HIGH, INFO, and UNKNOWN findings are reported for triage.', '');
+          lines.push('Quality gate: CRITICAL vulnerabilities, any secrets, and HIGH/CRITICAL misconfigurations fail Trivy and block deployment. Other findings are reported for triage.', '');
           lines.push('### CRITICAL vulnerability remediation');
           if (criticals.length === 0) {
             lines.push('', 'No CRITICAL vulnerabilities found in the generated Trivy JSON reports.');
@@ -310,7 +315,7 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
           NODE
 
-      - name: Trivy CRITICAL vulnerability gate
+      - name: Trivy security gate (CRITICAL vulns, secrets, misconfigs)
         run: |
           node <<'NODE'
           const fs = require('fs');
@@ -322,6 +327,10 @@ jobs:
             ['Docker image', 'trivy-image.json'],
           ];
           const criticals = [];
+          const secrets = [];
+          const misconfigs = [];
+          const blockingMisconfig = new Set(['HIGH', 'CRITICAL']);
+
           for (const [scan, file] of files) {
             const fullPath = path.join(reportDir, file);
             if (!fs.existsSync(fullPath)) {
@@ -330,11 +339,12 @@ jobs:
             }
             const report = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
             for (const result of report.Results || []) {
+              const target = result.Target || 'N/A';
               for (const vulnerability of result.Vulnerabilities || []) {
                 if (String(vulnerability.Severity).toUpperCase() === 'CRITICAL') {
                   criticals.push({
                     scan,
-                    target: result.Target || 'N/A',
+                    target,
                     packageName: vulnerability.PkgName || 'Unknown',
                     cve: vulnerability.VulnerabilityID || 'Unknown',
                     installed: vulnerability.InstalledVersion || 'Unknown',
@@ -342,16 +352,74 @@ jobs:
                   });
                 }
               }
+              for (const secret of result.Secrets || []) {
+                secrets.push({
+                  scan,
+                  target,
+                  rule: secret.RuleID || secret.Title || 'Unknown secret',
+                  severity: secret.Severity || 'UNKNOWN',
+                });
+              }
+              for (const misconfig of result.Misconfigurations || []) {
+                const severity = String(misconfig.Severity || '').toUpperCase();
+                if (blockingMisconfig.has(severity)) {
+                  misconfigs.push({
+                    scan,
+                    target,
+                    id: misconfig.ID || misconfig.AVDID || 'Unknown',
+                    title: misconfig.Title || misconfig.Type || 'Misconfiguration',
+                    severity,
+                  });
+                }
+              }
             }
           }
+
+          let failed = false;
           if (criticals.length > 0) {
+            failed = true;
             for (const finding of criticals) {
               console.error(`::error title=Trivy CRITICAL vulnerability::${finding.scan} ${finding.target}: ${finding.packageName} ${finding.cve}, installed ${finding.installed}, fixed ${finding.fixed}`);
             }
+          }
+          if (secrets.length > 0) {
+            failed = true;
+            for (const finding of secrets) {
+              console.error(`::error title=Trivy secret finding::${finding.scan} ${finding.target}: ${finding.rule} (${finding.severity})`);
+            }
+          }
+          if (misconfigs.length > 0) {
+            failed = true;
+            for (const finding of misconfigs) {
+              console.error(`::error title=Trivy misconfiguration::${finding.scan} ${finding.target}: ${finding.id} ${finding.title} (${finding.severity})`);
+            }
+          }
+          if (failed) {
             process.exit(1);
           }
-          console.log('Trivy found no CRITICAL vulnerabilities.');
+          console.log('Trivy found no CRITICAL vulnerabilities, secrets, or HIGH/CRITICAL misconfigurations.');
           NODE
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push scanned image
+        id: push-scanned-image
+        run: |
+          registry_image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+          tag="${GITHUB_SHA}"
+          docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "${registry_image}:${tag}"
+          docker push "${registry_image}:${tag}"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${registry_image}:${tag}" | awk -F@ '{print $2}')"
+          test -n "$digest"
+          echo "image=${registry_image}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Pushed scanned image ${registry_image}:${tag}@${digest}"
 
   zap-baseline:
     name: OWASP ZAP Baseline (Staging)
@@ -579,14 +647,14 @@ jobs:
             echo
             echo "| Gate | Result | Blocks deployment when |"
             echo "| --- | --- | --- |"
-            echo "| Trivy | $trivy_result | CRITICAL vulnerabilities are found |"
+            echo "| Trivy | $trivy_result | CRITICAL vulns, any secrets, or HIGH/CRITICAL misconfigs |"
             echo "| OWASP ZAP Baseline | $zap_result | HIGH-risk findings are found |"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
 
           failed=0
           if [ "$trivy_result" != "success" ]; then
-            echo "::error title=Security gate blocked deployment::Trivy Security Scan result was '$trivy_result'. Production deploy is blocked when Trivy reports CRITICAL vulnerabilities or the Trivy job cannot complete."
+            echo "::error title=Security gate blocked deployment::Trivy Security Scan result was '$trivy_result'. Production deploy is blocked when Trivy reports CRITICAL vulnerabilities, secrets, HIGH/CRITICAL misconfigurations, or the Trivy job cannot complete."
             failed=1
           fi
           if [ "$zap_result" != "success" ]; then
@@ -601,10 +669,13 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    needs: security-quality-gate
+    needs:
+      - security-quality-gate
+      - trivy-security
     timeout-minutes: 20
     permissions:
       contents: read
+      packages: read
     environment: production
     env:
       ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
@@ -612,12 +683,31 @@ jobs:
       ORACLE_PORT: ${{ secrets.ORACLE_PORT || '22' }}
       ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
       DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT || '/opt/slack-afk-bot' }}
+      APP_IMAGE: ${{ needs.trivy-security.outputs.image }}
+      APP_IMAGE_TAG: ${{ needs.trivy-security.outputs.tag }}
+      APP_IMAGE_DIGEST: ${{ needs.trivy-security.outputs.digest }}
     steps:
-      - name: Validate required secrets
+      - name: Validate required secrets and scanned image
         run: |
           test -n "$ORACLE_HOST"
           test -n "$ORACLE_USER"
           test -n "$ORACLE_SSH_KEY"
+          test -n "$APP_IMAGE"
+          test -n "$APP_IMAGE_TAG"
+          test -n "$APP_IMAGE_DIGEST"
+          echo "Deploying scanned image ${APP_IMAGE}:${APP_IMAGE_TAG}@${APP_IMAGE_DIGEST}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull scanned image
+        run: |
+          docker pull "${APP_IMAGE}@${APP_IMAGE_DIGEST}"
+          docker tag "${APP_IMAGE}@${APP_IMAGE_DIGEST}" "${APP_IMAGE}:${APP_IMAGE_TAG}"
 
       - name: Configure SSH
         run: |
@@ -626,10 +716,13 @@ jobs:
           chmod 600 ~/.ssh/oracle_deploy_key
           ssh-keyscan -p "$ORACLE_PORT" -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy over SSH
+      - name: Transfer scanned image and deploy over SSH
         run: |
+          docker save "${APP_IMAGE}:${APP_IMAGE_TAG}" | gzip | ssh -i ~/.ssh/oracle_deploy_key -p "$ORACLE_PORT" "$ORACLE_USER@$ORACLE_HOST" \
+            'set -euo pipefail; if docker ps >/dev/null 2>&1; then gunzip | docker load; else gunzip | sudo docker load; fi'
+
           ssh -i ~/.ssh/oracle_deploy_key -p "$ORACLE_PORT" "$ORACLE_USER@$ORACLE_HOST" \
-            "DEPLOY_ROOT='$DEPLOY_ROOT' REPO='https://github.com/${{ github.repository }}.git' BRANCH='${{ github.ref_name }}' bash -s" <<'SCRIPT'
+            "DEPLOY_ROOT='$DEPLOY_ROOT' REPO='https://github.com/${{ github.repository }}.git' BRANCH='${{ github.ref_name }}' APP_IMAGE='${APP_IMAGE}:${APP_IMAGE_TAG}' bash -s" <<'SCRIPT'
           set -euo pipefail
 
           APP_DIR="$DEPLOY_ROOT/app"
@@ -666,8 +759,14 @@ jobs:
           ln -sfn ../.env .env
           mkdir -p logs nginx/certs nginx/certbot-www
 
-          $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml build --pull app
-          $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml up -d --remove-orphans app redis
+          if ! $DOCKER image inspect "$APP_IMAGE" >/dev/null 2>&1; then
+            echo "Scanned image not present on server: $APP_IMAGE"
+            $DOCKER images
+            exit 1
+          fi
+
+          export APP_IMAGE
+          $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml up -d --no-build --remove-orphans app redis
           $DOCKER compose -f docker-compose.yml -f docker-compose.server.yml ps
 
           APP_CONTAINER="$($DOCKER compose -f docker-compose.yml -f docker-compose.server.yml ps -q app)"
