@@ -1,6 +1,7 @@
 services:
   app:
     image: ${APP_IMAGE:-slack-afk-automation-bot:local}
+    platform: ${APP_PLATFORM:-linux/arm64}
     build: .
     restart: unless-stopped
     tmpfs:
